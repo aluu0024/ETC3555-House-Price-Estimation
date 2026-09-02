@@ -180,7 +180,7 @@ dbl (2): ID, Price
 ℹ Use `spec()` to retrieve the full column specification for this data.
 ℹ Specify the column types or set `show_col_types = FALSE` to quiet this message.</code></pre>
 </div>
-<div class="code-copy-outer-scaffold"><div class="sourceCode cell-code" id="cb10"><pre class="sourceCode r code-with-copy"><code class="sourceCode r"><span id="cb10-1"><a href="#cb10-1" aria-hidden="true" tabindex="-1"></a>x_train <span class="ot">&lt;-</span> <span class="fu">read_csv</span>(here<span class="sc">::</span><span class="fu">here</span>(<span class="st">"data/x_train_houses.csv"</span>)) <span class="sc">|&gt;</span> </span>
+<div class="code-copy-outer-scaffold"><div class="sourceCode cell-code" id="cb10"><pre class="sourceCode r code-with-copy"><code class="sourceCode r"><span id="cb10-1"><a href="#cb10-1" aria-hidden="true" tabindex="-1"></a>x_train <span class="ot">&lt;-</span> <span class="fu">read_csv</span>(here<span class="sc">::</span><span class="fu">here</span>(<span class="st">"data/x_train_houses.csv"</span>)) <span class="sc">|&gt;</span></span>
 <span id="cb10-2"><a href="#cb10-2" aria-hidden="true" tabindex="-1"></a>  <span class="fu">rename</span>(<span class="at">ID =</span> <span class="st">"1:nrow(y_train)"</span>)</span></code></pre></div><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></div>
 <div class="cell-output cell-output-stderr">
 <pre><code>Rows: 15480 Columns: 10
@@ -309,6 +309,335 @@ dbl (9): 1:nrow(y_train), longitude, latitude, housing_median_age, total_roo...
 </tbody>
 </table>
 <p><code>median_income</code> has by far the strongest effect: each extra $10,000 of median block income is associated with roughly $40,000 higher predicted house price, holding other predictors fixed. <code>total_rooms</code> has a <em>negative</em> coefficient despite more rooms intuitively meaning a bigger/pricier block - this is a multicollinearity artefact, not a genuine effect: <code>total_rooms</code>, <code>total_bedrooms</code>, <code>population</code>, and <code>households</code> are all block-level totals that move together, so the model can’t cleanly separate their individual contributions. This is the kind of issue the ratio features in part (b) are meant to fix.</p>
+</section>
+</section>
+<section id="part-b" class="level2">
+<h2 class="anchored" data-anchor-id="part-b">Part (b)</h2>
+<p>Part (b) builds four models on top of part (a), each building on the last: (1) engineered features fit with plain OLS, (2) the same features with ridge regularisation to address the collinearity the features introduce, (3) a log(Price) target transform to address the right-skew in <code>Price</code> itself, and (4) ridge regularisation combined with the log(Price) target, to check whether the two techniques help more together than separately. Model 3 is the final part (b) model.</p>
+<section id="feature-engineering-bespoke-and-polynomial-features" class="level3">
+<h3 class="anchored" data-anchor-id="feature-engineering-bespoke-and-polynomial-features">Feature engineering: bespoke and polynomial features</h3>
+<ul>
+<li><code>rooms_per_household</code>, <code>bedrooms_per_room</code>, <code>population_per_household</code>, <code>rooms_per_person</code> (Lecture 3 bespoke ratios) - directly target the multicollinearity from part (a), where <code>total_rooms</code>, <code>total_bedrooms</code>, <code>population</code>, and <code>households</code> were fighting each other as raw block-level totals</li>
+<li><code>median_income_sq</code>, <code>housing_median_age_sq</code>, <code>income_x_age</code>, <code>longitude_x_latitude</code>, <code>longitude_sq</code>, <code>latitude_sq</code> (Lecture 5 polynomial/interaction terms) - complete the canonical quadratic basis <span class="math inline">\(z = (1, x_1, x_2, x_1x_2, x_1^2, x_2^2)\)</span> for <code>median_income</code>/<code>housing_median_age</code> and for <code>longitude</code>/<code>latitude</code>; the spatial terms let the model fit a diagonal price gradient along California’s coastline, which <code>longitude</code>/<code>latitude</code> alone (axis-aligned only) cannot</li>
+<li><code>log_total_rooms</code>, <code>log_total_bedrooms</code>, <code>log_population</code>, <code>log_households</code> - correct the heavy right-skew in those raw counts, which was producing extreme leverage points and negative predicted prices in part (a)’s residuals</li>
+<li><code>dist_to_city</code> - Euclidean distance (in degrees) from each block to the nearest of SF/LA/San Diego/San Jose, a geometric proxy for distance to a major job/price centre</li>
+<li><code>age_capped</code> - flags the 956 of 15,480 training rows where <code>housing_median_age</code> is top-coded at exactly 52 (“52+ years” rather than a precise age)</li>
+<li><code>median_income:ocean_proximity</code> (added in the model formula, not as a precomputed column) - lets income’s effect on price vary by location type</li>
+<li><code>bedrooms_per_room</code> is capped at 1: bedrooms can’t outnumber total rooms, and real (non-imputed) data never breaches that ratio, but a few rows have median-imputed <code>total_bedrooms</code> sitting on an atypically small block, which can push the <em>uncapped</em> ratio above 1 and produce unrealistic predictions further down the pipeline</li>
+</ul>
+<div class="cell">
+<div class="code-copy-outer-scaffold"><div class="sourceCode cell-code" id="cb26"><pre class="sourceCode r code-with-copy"><code class="sourceCode r"><span id="cb26-1"><a href="#cb26-1" aria-hidden="true" tabindex="-1"></a>city_coords <span class="ot">&lt;-</span> <span class="fu">tribble</span>(</span>
+<span id="cb26-2"><a href="#cb26-2" aria-hidden="true" tabindex="-1"></a>  <span class="sc">~</span>city,       <span class="sc">~</span>city_lon,  <span class="sc">~</span>city_lat,</span>
+<span id="cb26-3"><a href="#cb26-3" aria-hidden="true" tabindex="-1"></a>  <span class="st">"SF"</span>,        <span class="sc">-</span><span class="fl">122.4194</span>,  <span class="fl">37.7749</span>,</span>
+<span id="cb26-4"><a href="#cb26-4" aria-hidden="true" tabindex="-1"></a>  <span class="st">"LA"</span>,        <span class="sc">-</span><span class="fl">118.2437</span>,  <span class="fl">34.0522</span>,</span>
+<span id="cb26-5"><a href="#cb26-5" aria-hidden="true" tabindex="-1"></a>  <span class="st">"San Diego"</span>, <span class="sc">-</span><span class="fl">117.1611</span>,  <span class="fl">32.7157</span>,</span>
+<span id="cb26-6"><a href="#cb26-6" aria-hidden="true" tabindex="-1"></a>  <span class="st">"San Jose"</span>,  <span class="sc">-</span><span class="fl">121.8863</span>,  <span class="fl">37.3382</span></span>
+<span id="cb26-7"><a href="#cb26-7" aria-hidden="true" tabindex="-1"></a>)</span>
+<span id="cb26-8"><a href="#cb26-8" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb26-9"><a href="#cb26-9" aria-hidden="true" tabindex="-1"></a>dist_to_nearest_city <span class="ot">&lt;-</span> <span class="cf">function</span>(longitude, latitude) {</span>
+<span id="cb26-10"><a href="#cb26-10" aria-hidden="true" tabindex="-1"></a>  dists <span class="ot">&lt;-</span> <span class="fu">sapply</span>(<span class="fu">seq_len</span>(<span class="fu">nrow</span>(city_coords)), <span class="cf">function</span>(i) {</span>
+<span id="cb26-11"><a href="#cb26-11" aria-hidden="true" tabindex="-1"></a>    <span class="fu">sqrt</span>((longitude <span class="sc">-</span> city_coords<span class="sc">$</span>city_lon[i])<span class="sc">^</span><span class="dv">2</span> <span class="sc">+</span> (latitude <span class="sc">-</span> city_coords<span class="sc">$</span>city_lat[i])<span class="sc">^</span><span class="dv">2</span>)</span>
+<span id="cb26-12"><a href="#cb26-12" aria-hidden="true" tabindex="-1"></a>  })</span>
+<span id="cb26-13"><a href="#cb26-13" aria-hidden="true" tabindex="-1"></a>  <span class="fu">apply</span>(dists, <span class="dv">1</span>, min)</span>
+<span id="cb26-14"><a href="#cb26-14" aria-hidden="true" tabindex="-1"></a>}</span>
+<span id="cb26-15"><a href="#cb26-15" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb26-16"><a href="#cb26-16" aria-hidden="true" tabindex="-1"></a>engineer_features <span class="ot">&lt;-</span> <span class="cf">function</span>(df) {</span>
+<span id="cb26-17"><a href="#cb26-17" aria-hidden="true" tabindex="-1"></a>  df <span class="sc">|&gt;</span></span>
+<span id="cb26-18"><a href="#cb26-18" aria-hidden="true" tabindex="-1"></a>    <span class="fu">mutate</span>(</span>
+<span id="cb26-19"><a href="#cb26-19" aria-hidden="true" tabindex="-1"></a>      <span class="at">rooms_per_household =</span> total_rooms <span class="sc">/</span> households,</span>
+<span id="cb26-20"><a href="#cb26-20" aria-hidden="true" tabindex="-1"></a>      <span class="at">bedrooms_per_room =</span> <span class="fu">pmin</span>(total_bedrooms <span class="sc">/</span> total_rooms, <span class="dv">1</span>),</span>
+<span id="cb26-21"><a href="#cb26-21" aria-hidden="true" tabindex="-1"></a>      <span class="at">population_per_household =</span> population <span class="sc">/</span> households,</span>
+<span id="cb26-22"><a href="#cb26-22" aria-hidden="true" tabindex="-1"></a>      <span class="at">rooms_per_person =</span> total_rooms <span class="sc">/</span> population,</span>
+<span id="cb26-23"><a href="#cb26-23" aria-hidden="true" tabindex="-1"></a>      <span class="at">median_income_sq =</span> median_income<span class="sc">^</span><span class="dv">2</span>,</span>
+<span id="cb26-24"><a href="#cb26-24" aria-hidden="true" tabindex="-1"></a>      <span class="at">housing_median_age_sq =</span> housing_median_age<span class="sc">^</span><span class="dv">2</span>,</span>
+<span id="cb26-25"><a href="#cb26-25" aria-hidden="true" tabindex="-1"></a>      <span class="at">income_x_age =</span> median_income <span class="sc">*</span> housing_median_age,</span>
+<span id="cb26-26"><a href="#cb26-26" aria-hidden="true" tabindex="-1"></a>      <span class="at">longitude_x_latitude =</span> longitude <span class="sc">*</span> latitude,</span>
+<span id="cb26-27"><a href="#cb26-27" aria-hidden="true" tabindex="-1"></a>      <span class="at">longitude_sq =</span> longitude<span class="sc">^</span><span class="dv">2</span>,</span>
+<span id="cb26-28"><a href="#cb26-28" aria-hidden="true" tabindex="-1"></a>      <span class="at">latitude_sq =</span> latitude<span class="sc">^</span><span class="dv">2</span>,</span>
+<span id="cb26-29"><a href="#cb26-29" aria-hidden="true" tabindex="-1"></a>      <span class="at">log_total_rooms =</span> <span class="fu">log</span>(total_rooms),</span>
+<span id="cb26-30"><a href="#cb26-30" aria-hidden="true" tabindex="-1"></a>      <span class="at">log_total_bedrooms =</span> <span class="fu">log</span>(total_bedrooms),</span>
+<span id="cb26-31"><a href="#cb26-31" aria-hidden="true" tabindex="-1"></a>      <span class="at">log_population =</span> <span class="fu">log</span>(population),</span>
+<span id="cb26-32"><a href="#cb26-32" aria-hidden="true" tabindex="-1"></a>      <span class="at">log_households =</span> <span class="fu">log</span>(households),</span>
+<span id="cb26-33"><a href="#cb26-33" aria-hidden="true" tabindex="-1"></a>      <span class="at">age_capped =</span> <span class="fu">as.numeric</span>(housing_median_age <span class="sc">==</span> <span class="dv">52</span>),</span>
+<span id="cb26-34"><a href="#cb26-34" aria-hidden="true" tabindex="-1"></a>      <span class="at">dist_to_city =</span> <span class="fu">dist_to_nearest_city</span>(longitude, latitude)</span>
+<span id="cb26-35"><a href="#cb26-35" aria-hidden="true" tabindex="-1"></a>    ) <span class="sc">|&gt;</span></span>
+<span id="cb26-36"><a href="#cb26-36" aria-hidden="true" tabindex="-1"></a>    <span class="fu">select</span>(<span class="sc">-</span>total_rooms, <span class="sc">-</span>total_bedrooms, <span class="sc">-</span>population, <span class="sc">-</span>households)</span>
+<span id="cb26-37"><a href="#cb26-37" aria-hidden="true" tabindex="-1"></a>}</span>
+<span id="cb26-38"><a href="#cb26-38" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb26-39"><a href="#cb26-39" aria-hidden="true" tabindex="-1"></a>training <span class="ot">&lt;-</span> <span class="fu">engineer_features</span>(training)</span>
+<span id="cb26-40"><a href="#cb26-40" aria-hidden="true" tabindex="-1"></a>x_test <span class="ot">&lt;-</span> <span class="fu">engineer_features</span>(x_test)</span></code></pre></div><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></div>
+</div>
+</section>
+<section id="standardisation" class="level3">
+<h3 class="anchored" data-anchor-id="standardisation">Standardisation</h3>
+<p>Per Lecture 5, features on very different scales (e.g.&nbsp;<code>total_rooms</code> in the thousands vs <code>median_income</code> in single digits) get arbitrarily different weight magnitudes, which matters once regularisation penalises <code>||w||</code>. Standardise every continuous predictor to mean 0, variance 1 using <em>training</em> statistics only, applied to both training and test.</p>
+<div class="cell">
+<div class="code-copy-outer-scaffold"><div class="sourceCode cell-code" id="cb27"><pre class="sourceCode r code-with-copy"><code class="sourceCode r"><span id="cb27-1"><a href="#cb27-1" aria-hidden="true" tabindex="-1"></a>continuous_vars <span class="ot">&lt;-</span> <span class="fu">c</span>(</span>
+<span id="cb27-2"><a href="#cb27-2" aria-hidden="true" tabindex="-1"></a>  <span class="st">"longitude"</span>, <span class="st">"latitude"</span>, <span class="st">"housing_median_age"</span>, <span class="st">"median_income"</span>,</span>
+<span id="cb27-3"><a href="#cb27-3" aria-hidden="true" tabindex="-1"></a>  <span class="st">"rooms_per_household"</span>, <span class="st">"bedrooms_per_room"</span>, <span class="st">"population_per_household"</span>,</span>
+<span id="cb27-4"><a href="#cb27-4" aria-hidden="true" tabindex="-1"></a>  <span class="st">"rooms_per_person"</span>, <span class="st">"median_income_sq"</span>, <span class="st">"housing_median_age_sq"</span>, <span class="st">"income_x_age"</span>,</span>
+<span id="cb27-5"><a href="#cb27-5" aria-hidden="true" tabindex="-1"></a>  <span class="st">"longitude_x_latitude"</span>, <span class="st">"longitude_sq"</span>, <span class="st">"latitude_sq"</span>,</span>
+<span id="cb27-6"><a href="#cb27-6" aria-hidden="true" tabindex="-1"></a>  <span class="st">"log_total_rooms"</span>, <span class="st">"log_total_bedrooms"</span>, <span class="st">"log_population"</span>, <span class="st">"log_households"</span>,</span>
+<span id="cb27-7"><a href="#cb27-7" aria-hidden="true" tabindex="-1"></a>  <span class="st">"dist_to_city"</span></span>
+<span id="cb27-8"><a href="#cb27-8" aria-hidden="true" tabindex="-1"></a>)</span>
+<span id="cb27-9"><a href="#cb27-9" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb27-10"><a href="#cb27-10" aria-hidden="true" tabindex="-1"></a>train_means <span class="ot">&lt;-</span> <span class="fu">colMeans</span>(training[continuous_vars])</span>
+<span id="cb27-11"><a href="#cb27-11" aria-hidden="true" tabindex="-1"></a>train_sds <span class="ot">&lt;-</span> <span class="fu">sapply</span>(training[continuous_vars], sd)</span>
+<span id="cb27-12"><a href="#cb27-12" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb27-13"><a href="#cb27-13" aria-hidden="true" tabindex="-1"></a><span class="cf">for</span> (col <span class="cf">in</span> continuous_vars) {</span>
+<span id="cb27-14"><a href="#cb27-14" aria-hidden="true" tabindex="-1"></a>  training[[col]] <span class="ot">&lt;-</span> (training[[col]] <span class="sc">-</span> train_means[col]) <span class="sc">/</span> train_sds[col]</span>
+<span id="cb27-15"><a href="#cb27-15" aria-hidden="true" tabindex="-1"></a>  x_test[[col]] <span class="ot">&lt;-</span> (x_test[[col]] <span class="sc">-</span> train_means[col]) <span class="sc">/</span> train_sds[col]</span>
+<span id="cb27-16"><a href="#cb27-16" aria-hidden="true" tabindex="-1"></a>}</span></code></pre></div><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></div>
+</div>
+</section>
+<section id="model-1-linear-regression-on-engineered-features" class="level3">
+<h3 class="anchored" data-anchor-id="model-1-linear-regression-on-engineered-features">Model 1: linear regression on engineered features</h3>
+<div class="cell">
+<div class="code-copy-outer-scaffold"><div class="sourceCode cell-code" id="cb28"><pre class="sourceCode r code-with-copy"><code class="sourceCode r"><span id="cb28-1"><a href="#cb28-1" aria-hidden="true" tabindex="-1"></a>fit_b <span class="ot">&lt;-</span> <span class="fu">lm</span>(Price <span class="sc">~</span> . <span class="sc">+</span> median_income<span class="sc">:</span>ocean_proximity, <span class="at">data =</span> training)</span>
+<span id="cb28-2"><a href="#cb28-2" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb28-3"><a href="#cb28-3" aria-hidden="true" tabindex="-1"></a><span class="fu">rmse</span>(training<span class="sc">$</span>Price, <span class="fu">predict</span>(fit_b, training))</span></code></pre></div><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></div>
+<div class="cell-output cell-output-stdout">
+<pre><code>[1] 63793.81</code></pre>
+</div>
+<div class="code-copy-outer-scaffold"><div class="sourceCode cell-code" id="cb30"><pre class="sourceCode r code-with-copy"><code class="sourceCode r"><span id="cb30-1"><a href="#cb30-1" aria-hidden="true" tabindex="-1"></a><span class="fu">summary</span>(fit_b)<span class="sc">$</span>r.squared</span></code></pre></div><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></div>
+<div class="cell-output cell-output-stdout">
+<pre><code>[1] 0.6938656</code></pre>
+</div>
+</div>
+<div class="cell">
+<div class="code-copy-outer-scaffold"><div class="sourceCode cell-code" id="cb32"><pre class="sourceCode r code-with-copy"><code class="sourceCode r"><span id="cb32-1"><a href="#cb32-1" aria-hidden="true" tabindex="-1"></a>test_predictions_b <span class="ot">&lt;-</span> <span class="fu">predict</span>(fit_b, <span class="at">newdata =</span> x_test)</span>
+<span id="cb32-2"><a href="#cb32-2" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb32-3"><a href="#cb32-3" aria-hidden="true" tabindex="-1"></a>submission_b <span class="ot">&lt;-</span> <span class="fu">tibble</span>(<span class="at">ID =</span> x_test<span class="sc">$</span>ID, <span class="at">Price =</span> test_predictions_b)</span>
+<span id="cb32-4"><a href="#cb32-4" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb32-5"><a href="#cb32-5" aria-hidden="true" tabindex="-1"></a><span class="fu">write_csv</span>(submission_b, here<span class="sc">::</span><span class="fu">here</span>(<span class="st">"submissions/submission_b.csv"</span>))</span></code></pre></div><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></div>
+</div>
+<p>With <code>longitude</code>, <code>latitude</code>, <code>longitude^2</code>, <code>latitude^2</code>, and <code>longitude*latitude</code> all in the model together, the individual coefficients on these terms are large and unstable - they’re highly collinear by construction, all five being functions of the same two raw variables over a narrow real-world range - even though the overall fit and predictions are fine. This is the exact symptom Lecture 5’s ridge penalty is designed to fix, which motivates Model 2.</p>
+</section>
+<section id="model-2-ridge-regression-with-cross-validated-lambda" class="level3">
+<h3 class="anchored" data-anchor-id="model-2-ridge-regression-with-cross-validated-lambda">Model 2: ridge regression with cross-validated lambda</h3>
+<p>Lecture 5’s augmented error adds a ridge penalty to the loss: <span class="math inline">\(E_{aug}(\mathbf{w}) = E_{in}(\mathbf{w}) + \frac{\lambda}{N}\|\mathbf{w}\|_2^2\)</span>, which also has a closed-form solution, <span class="math inline">\(\mathbf{w}^*_{\text{ridge}} = (\mathbf{X}^T\mathbf{X} + \lambda I)^{-1}\mathbf{X}^T\mathbf{y}\)</span> - the same normal equations as part (a) with <span class="math inline">\(\lambda I\)</span> added (the intercept is excluded from the penalty, standard practice, since there’s no reason to shrink the baseline level toward zero). <span class="math inline">\(\lambda\)</span> is chosen by k-fold cross-validation, per the “Setting <span class="math inline">\(\lambda\)</span>” / “Cross-Validation” slides: for each candidate <span class="math inline">\(\lambda\)</span> on a grid, fit on <span class="math inline">\(K-1\)</span> folds and evaluate on the held-out fold, then pick the <span class="math inline">\(\lambda\)</span> with the smallest average out-of-sample error.</p>
+<div class="cell">
+<div class="code-copy-outer-scaffold"><div class="sourceCode cell-code" id="cb33"><pre class="sourceCode r code-with-copy"><code class="sourceCode r"><span id="cb33-1"><a href="#cb33-1" aria-hidden="true" tabindex="-1"></a>X <span class="ot">&lt;-</span> <span class="fu">model.matrix</span>(Price <span class="sc">~</span> . <span class="sc">+</span> median_income<span class="sc">:</span>ocean_proximity, <span class="at">data =</span> training)</span>
+<span id="cb33-2"><a href="#cb33-2" aria-hidden="true" tabindex="-1"></a>y <span class="ot">&lt;-</span> training<span class="sc">$</span>Price</span>
+<span id="cb33-3"><a href="#cb33-3" aria-hidden="true" tabindex="-1"></a>X_test <span class="ot">&lt;-</span> <span class="fu">model.matrix</span>(<span class="sc">~</span> . <span class="sc">+</span> median_income<span class="sc">:</span>ocean_proximity, <span class="at">data =</span> <span class="fu">select</span>(x_test, <span class="sc">-</span>ID))</span>
+<span id="cb33-4"><a href="#cb33-4" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb33-5"><a href="#cb33-5" aria-hidden="true" tabindex="-1"></a>ridge_fit <span class="ot">&lt;-</span> <span class="cf">function</span>(X, y, lambda) {</span>
+<span id="cb33-6"><a href="#cb33-6" aria-hidden="true" tabindex="-1"></a>  penalty <span class="ot">&lt;-</span> lambda <span class="sc">*</span> <span class="fu">diag</span>(<span class="fu">ncol</span>(X))</span>
+<span id="cb33-7"><a href="#cb33-7" aria-hidden="true" tabindex="-1"></a>  penalty[<span class="dv">1</span>, <span class="dv">1</span>] <span class="ot">&lt;-</span> <span class="dv">0</span>  <span class="co"># don't penalise the intercept</span></span>
+<span id="cb33-8"><a href="#cb33-8" aria-hidden="true" tabindex="-1"></a>  <span class="fu">solve</span>(<span class="fu">t</span>(X) <span class="sc">%*%</span> X <span class="sc">+</span> penalty, <span class="fu">t</span>(X) <span class="sc">%*%</span> y)</span>
+<span id="cb33-9"><a href="#cb33-9" aria-hidden="true" tabindex="-1"></a>}</span></code></pre></div><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></div>
+</div>
+<div class="cell">
+<div class="code-copy-outer-scaffold"><div class="sourceCode cell-code" id="cb34"><pre class="sourceCode r code-with-copy"><code class="sourceCode r"><span id="cb34-1"><a href="#cb34-1" aria-hidden="true" tabindex="-1"></a><span class="fu">set.seed</span>(<span class="dv">3555</span>)</span>
+<span id="cb34-2"><a href="#cb34-2" aria-hidden="true" tabindex="-1"></a>k <span class="ot">&lt;-</span> <span class="dv">5</span></span>
+<span id="cb34-3"><a href="#cb34-3" aria-hidden="true" tabindex="-1"></a>folds <span class="ot">&lt;-</span> <span class="fu">sample</span>(<span class="fu">rep</span>(<span class="dv">1</span><span class="sc">:</span>k, <span class="at">length.out =</span> <span class="fu">nrow</span>(X)))</span>
+<span id="cb34-4"><a href="#cb34-4" aria-hidden="true" tabindex="-1"></a>lambda_grid <span class="ot">&lt;-</span> <span class="dv">10</span><span class="sc">^</span><span class="fu">seq</span>(<span class="sc">-</span><span class="dv">4</span>, <span class="dv">4</span>, <span class="at">length.out =</span> <span class="dv">20</span>)</span>
+<span id="cb34-5"><a href="#cb34-5" aria-hidden="true" tabindex="-1"></a>cv_rmse <span class="ot">&lt;-</span> <span class="fu">numeric</span>(<span class="fu">length</span>(lambda_grid))</span>
+<span id="cb34-6"><a href="#cb34-6" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb34-7"><a href="#cb34-7" aria-hidden="true" tabindex="-1"></a><span class="cf">for</span> (i <span class="cf">in</span> <span class="fu">seq_along</span>(lambda_grid)) {</span>
+<span id="cb34-8"><a href="#cb34-8" aria-hidden="true" tabindex="-1"></a>  lambda <span class="ot">&lt;-</span> lambda_grid[i]</span>
+<span id="cb34-9"><a href="#cb34-9" aria-hidden="true" tabindex="-1"></a>  fold_rmse <span class="ot">&lt;-</span> <span class="fu">numeric</span>(k)</span>
+<span id="cb34-10"><a href="#cb34-10" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb34-11"><a href="#cb34-11" aria-hidden="true" tabindex="-1"></a>  <span class="cf">for</span> (fold <span class="cf">in</span> <span class="dv">1</span><span class="sc">:</span>k) {</span>
+<span id="cb34-12"><a href="#cb34-12" aria-hidden="true" tabindex="-1"></a>    is_train <span class="ot">&lt;-</span> folds <span class="sc">!=</span> fold</span>
+<span id="cb34-13"><a href="#cb34-13" aria-hidden="true" tabindex="-1"></a>    is_valid <span class="ot">&lt;-</span> folds <span class="sc">==</span> fold</span>
+<span id="cb34-14"><a href="#cb34-14" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb34-15"><a href="#cb34-15" aria-hidden="true" tabindex="-1"></a>    w <span class="ot">&lt;-</span> <span class="fu">ridge_fit</span>(X[is_train, ], y[is_train], lambda)</span>
+<span id="cb34-16"><a href="#cb34-16" aria-hidden="true" tabindex="-1"></a>    predicted <span class="ot">&lt;-</span> X[is_valid, ] <span class="sc">%*%</span> w</span>
+<span id="cb34-17"><a href="#cb34-17" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb34-18"><a href="#cb34-18" aria-hidden="true" tabindex="-1"></a>    fold_rmse[fold] <span class="ot">&lt;-</span> <span class="fu">rmse</span>(y[is_valid], predicted)</span>
+<span id="cb34-19"><a href="#cb34-19" aria-hidden="true" tabindex="-1"></a>  }</span>
+<span id="cb34-20"><a href="#cb34-20" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb34-21"><a href="#cb34-21" aria-hidden="true" tabindex="-1"></a>  cv_rmse[i] <span class="ot">&lt;-</span> <span class="fu">mean</span>(fold_rmse)</span>
+<span id="cb34-22"><a href="#cb34-22" aria-hidden="true" tabindex="-1"></a>}</span>
+<span id="cb34-23"><a href="#cb34-23" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb34-24"><a href="#cb34-24" aria-hidden="true" tabindex="-1"></a>best_lambda <span class="ot">&lt;-</span> lambda_grid[<span class="fu">which.min</span>(cv_rmse)]</span>
+<span id="cb34-25"><a href="#cb34-25" aria-hidden="true" tabindex="-1"></a>best_lambda</span></code></pre></div><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></div>
+<div class="cell-output cell-output-stdout">
+<pre><code>[1] 1e-04</code></pre>
+</div>
+<div class="code-copy-outer-scaffold"><div class="sourceCode cell-code" id="cb36"><pre class="sourceCode r code-with-copy"><code class="sourceCode r"><span id="cb36-1"><a href="#cb36-1" aria-hidden="true" tabindex="-1"></a><span class="fu">tibble</span>(<span class="at">lambda =</span> lambda_grid, <span class="at">cv_rmse =</span> cv_rmse) <span class="sc">|&gt;</span></span>
+<span id="cb36-2"><a href="#cb36-2" aria-hidden="true" tabindex="-1"></a>  <span class="fu">ggplot</span>(<span class="fu">aes</span>(<span class="at">x =</span> lambda, <span class="at">y =</span> cv_rmse)) <span class="sc">+</span></span>
+<span id="cb36-3"><a href="#cb36-3" aria-hidden="true" tabindex="-1"></a>  <span class="fu">geom_line</span>() <span class="sc">+</span></span>
+<span id="cb36-4"><a href="#cb36-4" aria-hidden="true" tabindex="-1"></a>  <span class="fu">geom_point</span>() <span class="sc">+</span></span>
+<span id="cb36-5"><a href="#cb36-5" aria-hidden="true" tabindex="-1"></a>  <span class="fu">scale_x_log10</span>() <span class="sc">+</span></span>
+<span id="cb36-6"><a href="#cb36-6" aria-hidden="true" tabindex="-1"></a>  <span class="fu">geom_vline</span>(<span class="at">xintercept =</span> best_lambda, <span class="at">linetype =</span> <span class="st">"dashed"</span>, <span class="at">colour =</span> <span class="st">"red"</span>) <span class="sc">+</span></span>
+<span id="cb36-7"><a href="#cb36-7" aria-hidden="true" tabindex="-1"></a>  <span class="fu">theme_minimal</span>() <span class="sc">+</span></span>
+<span id="cb36-8"><a href="#cb36-8" aria-hidden="true" tabindex="-1"></a>  <span class="fu">labs</span>(<span class="at">x =</span> <span class="st">"lambda (log scale)"</span>, <span class="at">y =</span> <span class="st">"5-fold CV RMSE"</span>, <span class="at">title =</span> <span class="st">"Cross-validated ridge lambda"</span>)</span></code></pre></div><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></div>
+<div class="cell-output-display">
+<div>
+<figure class="figure">
+<p><img src="Working-Out_files/figure-html/cross-validate%20lambda-1.png" class="img-fluid figure-img" width="672"></p>
+</figure>
+</div>
+</div>
+</div>
+<div class="cell">
+<div class="code-copy-outer-scaffold"><div class="sourceCode cell-code" id="cb37"><pre class="sourceCode r code-with-copy"><code class="sourceCode r"><span id="cb37-1"><a href="#cb37-1" aria-hidden="true" tabindex="-1"></a>w_ridge <span class="ot">&lt;-</span> <span class="fu">ridge_fit</span>(X, y, best_lambda)</span>
+<span id="cb37-2"><a href="#cb37-2" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb37-3"><a href="#cb37-3" aria-hidden="true" tabindex="-1"></a><span class="fu">rmse</span>(y, X <span class="sc">%*%</span> w_ridge)</span></code></pre></div><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></div>
+<div class="cell-output cell-output-stdout">
+<pre><code>[1] 63793.85</code></pre>
+</div>
+<div class="code-copy-outer-scaffold"><div class="sourceCode cell-code" id="cb39"><pre class="sourceCode r code-with-copy"><code class="sourceCode r"><span id="cb39-1"><a href="#cb39-1" aria-hidden="true" tabindex="-1"></a><span class="dv">1</span> <span class="sc">-</span> <span class="fu">sum</span>((y <span class="sc">-</span> X <span class="sc">%*%</span> w_ridge)<span class="sc">^</span><span class="dv">2</span>) <span class="sc">/</span> <span class="fu">sum</span>((y <span class="sc">-</span> <span class="fu">mean</span>(y))<span class="sc">^</span><span class="dv">2</span>)</span></code></pre></div><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></div>
+<div class="cell-output cell-output-stdout">
+<pre><code>[1] 0.6938653</code></pre>
+</div>
+<div class="code-copy-outer-scaffold"><div class="sourceCode cell-code" id="cb41"><pre class="sourceCode r code-with-copy"><code class="sourceCode r"><span id="cb41-1"><a href="#cb41-1" aria-hidden="true" tabindex="-1"></a>test_predictions_ridge <span class="ot">&lt;-</span> <span class="fu">as.numeric</span>(X_test <span class="sc">%*%</span> w_ridge)</span>
+<span id="cb41-2"><a href="#cb41-2" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb41-3"><a href="#cb41-3" aria-hidden="true" tabindex="-1"></a>submission_ridge <span class="ot">&lt;-</span> <span class="fu">tibble</span>(<span class="at">ID =</span> x_test<span class="sc">$</span>ID, <span class="at">Price =</span> test_predictions_ridge)</span>
+<span id="cb41-4"><a href="#cb41-4" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb41-5"><a href="#cb41-5" aria-hidden="true" tabindex="-1"></a><span class="fu">write_csv</span>(submission_ridge, here<span class="sc">::</span><span class="fu">here</span>(<span class="st">"submissions/submission_b_ridge.csv"</span>))</span></code></pre></div><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></div>
+</div>
+<p><strong>Findings:</strong></p>
+<ul>
+<li>CV selects <span class="math inline">\(\lambda \approx 10^{-4}\)</span>, i.e.&nbsp;essentially no regularisation (<span class="math inline">\(\lambda \to 0 \approx\)</span> OLS).</li>
+<li>This doesn’t contradict the coefficient instability noted above - the individual coefficients on the five collinear spatial terms are still large and poorly determined.</li>
+<li>It means that with <span class="math inline">\(n = 15{,}480\)</span> training rows and only <span class="math inline">\(p = 29\)</span> parameters, there isn’t enough variance in the <em>predictions</em> (as opposed to the individual coefficients) for shrinkage to pay off - in-sample R² for this model comes out effectively identical to Model 1 (0.694 vs 0.694).</li>
+<li>Kaggle score for this model (<code>submission_b_ridge.csv</code>): 0.690 R².</li>
+<li>Ridge is still the right tool to reach for as feature/parameter count grows (particularly once part (c)’s ANN is in play) - it just isn’t doing much work for this specific linear model, so Model 3 below builds on Model 1 (plain OLS) rather than on the ridge fit. The same <code>ridge_fit()</code> function, lambda grid, and fold assignment are reused again in Model 4, refit on the log(Price) target, to check whether combining the two techniques changes anything.</li>
+</ul>
+</section>
+<section id="model-3-log-transformed-target" class="level3">
+<h3 class="anchored" data-anchor-id="model-3-log-transformed-target">Model 3: log-transformed target</h3>
+<p>House prices are right-skewed, and part (a)’s residual plot showed a funnel shape (errors growing with predicted price) - both point to modelling <code>log(Price)</code> instead of <code>Price</code> directly. This is the final part (b) model.</p>
+<div class="cell">
+<div class="code-copy-outer-scaffold"><div class="sourceCode cell-code" id="cb42"><pre class="sourceCode r code-with-copy"><code class="sourceCode r"><span id="cb42-1"><a href="#cb42-1" aria-hidden="true" tabindex="-1"></a>fit_log <span class="ot">&lt;-</span> <span class="fu">lm</span>(<span class="fu">log</span>(Price) <span class="sc">~</span> . <span class="sc">+</span> median_income<span class="sc">:</span>ocean_proximity, <span class="at">data =</span> training)</span>
+<span id="cb42-2"><a href="#cb42-2" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb42-3"><a href="#cb42-3" aria-hidden="true" tabindex="-1"></a>predicted_log <span class="ot">&lt;-</span> <span class="fu">predict</span>(fit_log, training)</span>
+<span id="cb42-4"><a href="#cb42-4" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb42-5"><a href="#cb42-5" aria-hidden="true" tabindex="-1"></a>log_resid <span class="ot">&lt;-</span> <span class="fu">log</span>(training<span class="sc">$</span>Price) <span class="sc">-</span> predicted_log</span>
+<span id="cb42-6"><a href="#cb42-6" aria-hidden="true" tabindex="-1"></a>smear <span class="ot">&lt;-</span> <span class="fu">mean</span>(<span class="fu">exp</span>(log_resid))</span>
+<span id="cb42-7"><a href="#cb42-7" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb42-8"><a href="#cb42-8" aria-hidden="true" tabindex="-1"></a>predicted_price <span class="ot">&lt;-</span> <span class="fu">exp</span>(predicted_log) <span class="sc">*</span> smear</span>
+<span id="cb42-9"><a href="#cb42-9" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb42-10"><a href="#cb42-10" aria-hidden="true" tabindex="-1"></a><span class="fu">rmse</span>(training<span class="sc">$</span>Price, predicted_price)</span></code></pre></div><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></div>
+<div class="cell-output cell-output-stdout">
+<pre><code>[1] 62212.15</code></pre>
+</div>
+<div class="code-copy-outer-scaffold"><div class="sourceCode cell-code" id="cb44"><pre class="sourceCode r code-with-copy"><code class="sourceCode r"><span id="cb44-1"><a href="#cb44-1" aria-hidden="true" tabindex="-1"></a><span class="dv">1</span> <span class="sc">-</span> <span class="fu">sum</span>((training<span class="sc">$</span>Price <span class="sc">-</span> predicted_price)<span class="sc">^</span><span class="dv">2</span>) <span class="sc">/</span> <span class="fu">sum</span>((training<span class="sc">$</span>Price <span class="sc">-</span> <span class="fu">mean</span>(training<span class="sc">$</span>Price))<span class="sc">^</span><span class="dv">2</span>)</span></code></pre></div><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></div>
+<div class="cell-output cell-output-stdout">
+<pre><code>[1] 0.7088576</code></pre>
+</div>
+</div>
+<div class="cell">
+<div class="code-copy-outer-scaffold"><div class="sourceCode cell-code" id="cb46"><pre class="sourceCode r code-with-copy"><code class="sourceCode r"><span id="cb46-1"><a href="#cb46-1" aria-hidden="true" tabindex="-1"></a>test_pred_log <span class="ot">&lt;-</span> <span class="fu">predict</span>(fit_log, <span class="at">newdata =</span> x_test)</span>
+<span id="cb46-2"><a href="#cb46-2" aria-hidden="true" tabindex="-1"></a>test_pred_price <span class="ot">&lt;-</span> <span class="fu">exp</span>(test_pred_log) <span class="sc">*</span> smear</span>
+<span id="cb46-3"><a href="#cb46-3" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb46-4"><a href="#cb46-4" aria-hidden="true" tabindex="-1"></a>submission_log <span class="ot">&lt;-</span> <span class="fu">tibble</span>(<span class="at">ID =</span> x_test<span class="sc">$</span>ID, <span class="at">Price =</span> test_pred_price)</span>
+<span id="cb46-5"><a href="#cb46-5" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb46-6"><a href="#cb46-6" aria-hidden="true" tabindex="-1"></a><span class="fu">write_csv</span>(submission_log, here<span class="sc">::</span><span class="fu">here</span>(<span class="st">"submissions/submission_b_log.csv"</span>))</span></code></pre></div><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></div>
+</div>
+<p><strong>Notes:</strong></p>
+<ul>
+<li>Naive back-transform (<code>exp(predicted_log)</code>) is biased low - by Jensen’s inequality, <span class="math inline">\(E[\exp(X)] \geq \exp(E[X])\)</span>, so exponentiating a prediction of the <em>mean</em> of <code>log(Price)</code> underestimates the mean of <code>Price</code>. <code>smear</code> (Duan’s smearing estimator: the average of <code>exp(residual)</code> on the log scale) corrects for this.</li>
+<li>Every prediction is <code>exp(...)</code>, so they’re guaranteed positive - this resolves the negative-predicted-price extrapolation issue flagged in part (a).</li>
+<li>Builds on Model 1’s feature set (not Model 2’s ridge fit), since Model 2 found regularisation unnecessary here.</li>
+</ul>
+</section>
+<section id="model-4-ridge-regression-on-the-logprice-target" class="level3">
+<h3 class="anchored" data-anchor-id="model-4-ridge-regression-on-the-logprice-target">Model 4: ridge regression on the log(Price) target</h3>
+<p>As a further check, Model 2’s ridge machinery (the same <code>ridge_fit()</code> function, lambda grid, and fold assignment) is reused here, refit on the log(Price) target rather than raw <code>Price</code>, to see whether combining regularisation with the log transform beats either technique alone.</p>
+<div class="cell">
+<div class="code-copy-outer-scaffold"><div class="sourceCode cell-code" id="cb47"><pre class="sourceCode r code-with-copy"><code class="sourceCode r"><span id="cb47-1"><a href="#cb47-1" aria-hidden="true" tabindex="-1"></a>y_log <span class="ot">&lt;-</span> <span class="fu">log</span>(training<span class="sc">$</span>Price)</span>
+<span id="cb47-2"><a href="#cb47-2" aria-hidden="true" tabindex="-1"></a>cv_rmse_log <span class="ot">&lt;-</span> <span class="fu">numeric</span>(<span class="fu">length</span>(lambda_grid))</span>
+<span id="cb47-3"><a href="#cb47-3" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb47-4"><a href="#cb47-4" aria-hidden="true" tabindex="-1"></a><span class="cf">for</span> (i <span class="cf">in</span> <span class="fu">seq_along</span>(lambda_grid)) {</span>
+<span id="cb47-5"><a href="#cb47-5" aria-hidden="true" tabindex="-1"></a>  lambda <span class="ot">&lt;-</span> lambda_grid[i]</span>
+<span id="cb47-6"><a href="#cb47-6" aria-hidden="true" tabindex="-1"></a>  fold_rmse <span class="ot">&lt;-</span> <span class="fu">numeric</span>(k)</span>
+<span id="cb47-7"><a href="#cb47-7" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb47-8"><a href="#cb47-8" aria-hidden="true" tabindex="-1"></a>  <span class="cf">for</span> (fold <span class="cf">in</span> <span class="dv">1</span><span class="sc">:</span>k) {</span>
+<span id="cb47-9"><a href="#cb47-9" aria-hidden="true" tabindex="-1"></a>    is_train <span class="ot">&lt;-</span> folds <span class="sc">!=</span> fold</span>
+<span id="cb47-10"><a href="#cb47-10" aria-hidden="true" tabindex="-1"></a>    is_valid <span class="ot">&lt;-</span> folds <span class="sc">==</span> fold</span>
+<span id="cb47-11"><a href="#cb47-11" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb47-12"><a href="#cb47-12" aria-hidden="true" tabindex="-1"></a>    w <span class="ot">&lt;-</span> <span class="fu">ridge_fit</span>(X[is_train, ], y_log[is_train], lambda)</span>
+<span id="cb47-13"><a href="#cb47-13" aria-hidden="true" tabindex="-1"></a>    predicted <span class="ot">&lt;-</span> X[is_valid, ] <span class="sc">%*%</span> w</span>
+<span id="cb47-14"><a href="#cb47-14" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb47-15"><a href="#cb47-15" aria-hidden="true" tabindex="-1"></a>    fold_rmse[fold] <span class="ot">&lt;-</span> <span class="fu">rmse</span>(y_log[is_valid], predicted)</span>
+<span id="cb47-16"><a href="#cb47-16" aria-hidden="true" tabindex="-1"></a>  }</span>
+<span id="cb47-17"><a href="#cb47-17" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb47-18"><a href="#cb47-18" aria-hidden="true" tabindex="-1"></a>  cv_rmse_log[i] <span class="ot">&lt;-</span> <span class="fu">mean</span>(fold_rmse)</span>
+<span id="cb47-19"><a href="#cb47-19" aria-hidden="true" tabindex="-1"></a>}</span>
+<span id="cb47-20"><a href="#cb47-20" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb47-21"><a href="#cb47-21" aria-hidden="true" tabindex="-1"></a>best_lambda_log <span class="ot">&lt;-</span> lambda_grid[<span class="fu">which.min</span>(cv_rmse_log)]</span>
+<span id="cb47-22"><a href="#cb47-22" aria-hidden="true" tabindex="-1"></a>best_lambda_log</span></code></pre></div><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></div>
+<div class="cell-output cell-output-stdout">
+<pre><code>[1] 1e-04</code></pre>
+</div>
+</div>
+<div class="cell">
+<div class="code-copy-outer-scaffold"><div class="sourceCode cell-code" id="cb49"><pre class="sourceCode r code-with-copy"><code class="sourceCode r"><span id="cb49-1"><a href="#cb49-1" aria-hidden="true" tabindex="-1"></a>w_ridge_log <span class="ot">&lt;-</span> <span class="fu">ridge_fit</span>(X, y_log, best_lambda_log)</span>
+<span id="cb49-2"><a href="#cb49-2" aria-hidden="true" tabindex="-1"></a>predicted_log_ridge <span class="ot">&lt;-</span> X <span class="sc">%*%</span> w_ridge_log</span>
+<span id="cb49-3"><a href="#cb49-3" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb49-4"><a href="#cb49-4" aria-hidden="true" tabindex="-1"></a>log_resid_ridge <span class="ot">&lt;-</span> y_log <span class="sc">-</span> predicted_log_ridge</span>
+<span id="cb49-5"><a href="#cb49-5" aria-hidden="true" tabindex="-1"></a>smear_ridge <span class="ot">&lt;-</span> <span class="fu">mean</span>(<span class="fu">exp</span>(log_resid_ridge))</span>
+<span id="cb49-6"><a href="#cb49-6" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb49-7"><a href="#cb49-7" aria-hidden="true" tabindex="-1"></a>predicted_price_ridge_log <span class="ot">&lt;-</span> <span class="fu">exp</span>(predicted_log_ridge) <span class="sc">*</span> smear_ridge</span>
+<span id="cb49-8"><a href="#cb49-8" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb49-9"><a href="#cb49-9" aria-hidden="true" tabindex="-1"></a><span class="fu">rmse</span>(training<span class="sc">$</span>Price, predicted_price_ridge_log)</span></code></pre></div><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></div>
+<div class="cell-output cell-output-stdout">
+<pre><code>[1] 62212.61</code></pre>
+</div>
+<div class="code-copy-outer-scaffold"><div class="sourceCode cell-code" id="cb51"><pre class="sourceCode r code-with-copy"><code class="sourceCode r"><span id="cb51-1"><a href="#cb51-1" aria-hidden="true" tabindex="-1"></a><span class="dv">1</span> <span class="sc">-</span> <span class="fu">sum</span>((training<span class="sc">$</span>Price <span class="sc">-</span> predicted_price_ridge_log)<span class="sc">^</span><span class="dv">2</span>) <span class="sc">/</span> <span class="fu">sum</span>((training<span class="sc">$</span>Price <span class="sc">-</span> <span class="fu">mean</span>(training<span class="sc">$</span>Price))<span class="sc">^</span><span class="dv">2</span>)</span></code></pre></div><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></div>
+<div class="cell-output cell-output-stdout">
+<pre><code>[1] 0.7088533</code></pre>
+</div>
+</div>
+<div class="cell">
+<div class="code-copy-outer-scaffold"><div class="sourceCode cell-code" id="cb53"><pre class="sourceCode r code-with-copy"><code class="sourceCode r"><span id="cb53-1"><a href="#cb53-1" aria-hidden="true" tabindex="-1"></a>test_pred_log_ridge <span class="ot">&lt;-</span> X_test <span class="sc">%*%</span> w_ridge_log</span>
+<span id="cb53-2"><a href="#cb53-2" aria-hidden="true" tabindex="-1"></a>test_pred_price_ridge_log <span class="ot">&lt;-</span> <span class="fu">as.numeric</span>(<span class="fu">exp</span>(test_pred_log_ridge) <span class="sc">*</span> smear_ridge)</span>
+<span id="cb53-3"><a href="#cb53-3" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb53-4"><a href="#cb53-4" aria-hidden="true" tabindex="-1"></a>submission_ridge_log <span class="ot">&lt;-</span> <span class="fu">tibble</span>(<span class="at">ID =</span> x_test<span class="sc">$</span>ID, <span class="at">Price =</span> test_pred_price_ridge_log)</span>
+<span id="cb53-5"><a href="#cb53-5" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb53-6"><a href="#cb53-6" aria-hidden="true" tabindex="-1"></a><span class="fu">write_csv</span>(submission_ridge_log, here<span class="sc">::</span><span class="fu">here</span>(<span class="st">"submissions/submission_b_ridge_log.csv"</span>))</span></code></pre></div><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></div>
+</div>
+<p><strong>Findings:</strong></p>
+<ul>
+<li>CV on the log scale again selects <span class="math inline">\(\lambda \approx 10^{-4}\)</span> (<span class="math inline">\(\approx 0\)</span>) - regularisation doesn’t help here either.</li>
+<li>In-sample fit is virtually identical to Model 3’s plain OLS fit on log(Price) (RMSE 62,212 either way, R² 0.709) - confirms Model 2’s finding holds regardless of the target’s scale.</li>
+<li>Combining the two techniques doesn’t outperform either alone here, so Model 3 (simpler, no regularisation needed) stays the designated final model.</li>
+</ul>
+<table class="caption-top table">
+<colgroup>
+<col style="width: 33%">
+<col style="width: 33%">
+<col style="width: 33%">
+</colgroup>
+<thead>
+<tr class="header">
+<th>Model</th>
+<th>In-sample R²</th>
+<th>Kaggle (out-of-sample) R²</th>
+</tr>
+</thead>
+<tbody>
+<tr class="odd">
+<td>Linear regression (part a)</td>
+<td>0.646</td>
+<td>0.645</td>
+</tr>
+<tr class="even">
+<td>Model 1: engineered features (OLS)</td>
+<td>0.694</td>
+<td><em>not separately submitted</em></td>
+</tr>
+<tr class="odd">
+<td>Model 2: + ridge regression, CV-selected lambda</td>
+<td>0.694</td>
+<td>0.690</td>
+</tr>
+<tr class="even">
+<td>Model 3: + log(Price) target, smeared back-transform (final)</td>
+<td>0.709 (RMSE 62,212)</td>
+<td>0.688</td>
+</tr>
+<tr class="odd">
+<td>Model 4: ridge regression on log(Price) target</td>
+<td>0.709 (RMSE 62,212)</td>
+<td><em>pending resubmission</em></td>
+</tr>
+</tbody>
+</table>
 </section>
 </section>
 
