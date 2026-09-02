@@ -21,6 +21,116 @@ x_train <- read_csv(here::here("data/x_train_houses.csv")) |>
 training <- left_join(y_train, x_train, by = "ID") |> select(-ID)
 ```
 
+## EDA
+
+Before engineering any features, look at the raw data to see what patterns and issues are actually present.
+
+### Distribution of ocean_proximity
+
+```{r, eda ocean proximity counts}
+training |>
+  count(ocean_proximity) |>
+  ggplot(aes(x = reorder(ocean_proximity, n), y = n)) +
+  geom_col() +
+  coord_flip() +
+  labs(title = "Distribution of ocean_proximity", x = NULL, y = "Count")
+```
+
+- Category sizes are wildly unequal: `<1H OCEAN` (6,835 rows) and `INLAND` (4,903) dominate, while `ISLAND` has only 4 rows in the entire training set
+- Matters for how much to trust any group-level comparison involving `ISLAND` later on
+
+### Distributions of all continuous variables
+
+```{r, eda all distributions}
+training |>
+  select(longitude, latitude, housing_median_age, total_rooms, total_bedrooms,
+         population, households, median_income, Price) |>
+  pivot_longer(everything(), names_to = "variable", values_to = "value") |>
+  ggplot(aes(x = value)) +
+  geom_histogram(bins = 40) +
+  facet_wrap(~variable, scales = "free", ncol = 3) +
+  labs(title = "Distributions of all continuous variables", x = NULL, y = "Count")
+```
+
+- `Price`: right-skewed with a large spike at exactly \$500,001 (723 of 15,480 rows) - a top-coded/capped value, not a genuine cluster of identical home prices. Motivates modelling `log(Price)` in part (b), and explains the diagonal-line artifact that shows up in residual plots regardless of model, since a fixed number of rows share an identical true value while their predictions vary
+- `housing_median_age`: a spike at exactly 52, the maximum (956 rows) - top-coded ("52+ years"). Motivates the `age_capped` flag in part (b)
+- `median_income`: also top-coded, at exactly 15.0001 (33 rows) - the same pattern as `Price` and `housing_median_age`, just affecting far fewer rows (0.2%, vs. 4.7% and 6.2%), so not worth a dedicated feature the way `age_capped` was
+- `total_rooms`, `total_bedrooms`, `population`, `households`: all heavily right-skewed with a sharp peak near small values and a long tail - motivates the `log_total_rooms` etc. features in part (b)
+- `longitude`, `latitude`: multi-modal, with distinct peaks around the SF Bay Area and LA - reflects population being concentrated in a few metro areas rather than spread evenly
+
+### Raw totals vs. households per block
+
+```{r, eda totals vs households}
+training |>
+  select(households, total_rooms, total_bedrooms, population) |>
+  pivot_longer(-households, names_to = "variable", values_to = "value") |>
+  ggplot(aes(x = households, y = value)) +
+  geom_point(alpha = 0.15, size = 0.6) +
+  facet_wrap(~variable, scales = "free_y") +
+  labs(title = "Raw totals vs. households per block", x = "Households", y = "Total")
+```
+
+- `total_rooms`, `total_bedrooms`, and `population` all sit almost exactly on a straight line through the origin against `households` - these "totals" are overwhelmingly just measuring how many households are in the block, not anything about the housing itself
+- A block's raw total is mechanically proportional to its size, so the genuine signal about housing characteristics is in the *ratio* to `households`, not the raw total - this is a stronger justification for the bespoke ratio features than correlation between the totals alone would be
+
+### Price by location
+
+```{r, eda price location}
+ca_map <- map_data("state") |> filter(region == "california")
+
+training |>
+  ggplot() +
+  geom_polygon(data = ca_map, aes(x = long, y = lat, group = group), fill = "grey95", colour = "grey50") +
+  geom_point(aes(x = longitude, y = latitude, colour = Price), alpha = 0.4, size = 0.8) +
+  scale_colour_viridis_c() +
+  coord_quickmap() +
+  labs(title = "Price by location", x = "Longitude", y = "Latitude")
+```
+
+- Price clearly varies by location, following California's coastline rather than either axis alone
+- Motivates the polynomial/interaction location terms in part (b) (`longitude^2`, `latitude^2`, `longitude*latitude`), since a plain linear term in `longitude`/`latitude` alone can only fit an axis-aligned gradient
+
+### Mean Price by ocean_proximity
+
+```{r, eda price by ocean proximity}
+training |>
+  group_by(ocean_proximity) |>
+  summarise(
+    n = n(),
+    mean_price = mean(Price),
+    se_price = sd(Price) / sqrt(n)
+  ) |>
+  mutate(lower = mean_price - 1.96 * se_price, upper = mean_price + 1.96 * se_price) |>
+  ggplot(aes(x = reorder(ocean_proximity, mean_price), y = mean_price)) +
+  geom_pointrange(aes(ymin = lower, ymax = upper)) +
+  labs(title = "Mean Price by ocean_proximity (95% CI)", x = "ocean_proximity", y = "Mean Price ($)")
+```
+
+- Mean price, not a boxplot of the raw block values, because `Price` is already a block-level aggregate and category sizes are wildly unequal (see above) - the CI width directly reflects how much each group's estimate should be trusted
+- `INLAND` sits clearly lowest with a tight CI (n = 4,903); the three ocean-adjacent categories cluster around \$240-258k; `ISLAND` has the highest mean (\$403,675) but a CI spanning \$334k-\$473k, since it's estimated from only 4 rows
+- Motivates keeping `ocean_proximity` as a predictor, and treating `ISLAND`'s estimated effect with caution given how little data supports it
+
+### Mean Price by median_income decile and ocean_proximity
+
+```{r, eda price by income and ocean proximity}
+training |>
+  mutate(income_decile = ntile(median_income, 10)) |>
+  group_by(ocean_proximity, income_decile) |>
+  summarise(n = n(), mean_price = mean(Price), se_price = sd(Price) / sqrt(n), .groups = "drop") |>
+  mutate(lower = mean_price - 1.96 * se_price, upper = mean_price + 1.96 * se_price) |>
+  filter(n >= 10) |>
+  ggplot(aes(x = income_decile, y = mean_price, colour = ocean_proximity, fill = ocean_proximity)) +
+  geom_ribbon(aes(ymin = lower, ymax = upper), alpha = 0.15, colour = NA) +
+  geom_line() +
+  geom_point(size = 1.5) +
+  labs(title = "Mean Price by median_income decile and ocean_proximity",
+       x = "median_income decile", y = "Mean Price ($)", colour = "ocean_proximity", fill = "ocean_proximity")
+```
+
+- `ISLAND` drops out automatically (only 4 rows total, too few to support even one income decile with `n >= 10`) - consistent with the wide CI above
+- `INLAND` sits below every coastal category at every income level, and the gap *widens* with income rather than staying constant - the income-price slope is less steep for `INLAND` than for the coastal categories
+- Direct evidence for the `median_income:ocean_proximity` interaction term in part (b): this isn't just "location matters," it's "location changes how much income matters"
+
 ## Part (a)
 
 ### Linear Regression using basic R-package
@@ -45,6 +155,18 @@ rmse <- function(actual, predicted) {
 
 rmse(training$Price, predict(final_fit, training))
 summary(final_fit)$r.squared
+```
+
+```{r, resid vs fitted part a}
+resid_plot <- function(fitted, actual, title) {
+  tibble(fitted = fitted, resid = actual - fitted) |>
+    ggplot(aes(x = fitted, y = resid)) +
+    geom_point(alpha = 0.15, size = 0.5) +
+    geom_hline(yintercept = 0, colour = "red", linetype = "dashed") +
+    labs(title = title, x = "Fitted", y = "Residual")
+}
+
+resid_plot(predict(final_fit, training), training$Price, "Residuals vs fitted: Linear regression (part a)")
 ```
 
 ### Linear regression from first principles
@@ -200,6 +322,10 @@ submission_b <- tibble(ID = x_test$ID, Price = test_predictions_b)
 write_csv(submission_b, here::here("submissions/submission_b.csv"))
 ```
 
+```{r, resid vs fitted model 1}
+resid_plot(predict(fit_b, training), training$Price, "Residuals vs fitted: Model 1 (engineered features, OLS)")
+```
+
 With `longitude`, `latitude`, `longitude^2`, `latitude^2`, and `longitude*latitude` all in the model together, the individual coefficients on these terms are large and unstable - they're highly collinear by construction, all five being functions of the same two raw variables over a narrow real-world range - even though the overall fit and predictions are fine. This is the exact symptom Lecture 5's ridge penalty is designed to fix, which motivates Model 2.
 
 ### Model 2: ridge regression with cross-validated lambda
@@ -268,6 +394,10 @@ submission_ridge <- tibble(ID = x_test$ID, Price = test_predictions_ridge)
 write_csv(submission_ridge, here::here("submissions/submission_b_ridge.csv"))
 ```
 
+```{r, resid vs fitted model 2}
+resid_plot(as.numeric(X %*% w_ridge), training$Price, "Residuals vs fitted: Model 2 (ridge)")
+```
+
 **Findings:**
 
 - CV selects $\lambda \approx 10^{-4}$, i.e. essentially no regularisation ($\lambda \to 0 \approx$ OLS).
@@ -301,6 +431,12 @@ test_pred_price <- exp(test_pred_log) * smear
 submission_log <- tibble(ID = x_test$ID, Price = test_pred_price)
 
 write_csv(submission_log, here::here("submissions/submission_b_log.csv"))
+```
+
+Since the model is fit on `log(Price)`, the residual diagnostic belongs on that same scale, not the back-transformed dollar scale.
+
+```{r, resid vs fitted model 3}
+resid_plot(predicted_log, log(training$Price), "Residuals vs fitted (log scale): Model 3 (log target, final)")
 ```
 
 **Notes:**
@@ -358,6 +494,10 @@ test_pred_price_ridge_log <- as.numeric(exp(test_pred_log_ridge) * smear_ridge)
 submission_ridge_log <- tibble(ID = x_test$ID, Price = test_pred_price_ridge_log)
 
 write_csv(submission_ridge_log, here::here("submissions/submission_b_ridge_log.csv"))
+```
+
+```{r, resid vs fitted model 4}
+resid_plot(as.numeric(predicted_log_ridge), y_log, "Residuals vs fitted (log scale): Model 4 (ridge + log target)")
 ```
 
 **Findings:**
