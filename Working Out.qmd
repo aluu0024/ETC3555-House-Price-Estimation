@@ -1,0 +1,104 @@
+---
+title: "Housing Prices"
+author: "Adrian Luu"
+format: html
+editor: visual
+---
+
+```{r}
+library(tidyverse)
+library(here)
+library(broom)
+```
+
+```{r, loading data}
+x_test <- read_csv(here::here("data/x_test_houses.csv")) |>
+  rename(ID = "(nrow(y_train) + 1):(nrow(y_train) + nrow(y_test))")
+y_train <- read_csv(here::here("data/y_train_houses.csv"))
+x_train <- read_csv(here::here("data/x_train_houses.csv")) |> 
+  rename(ID = "1:nrow(y_train)")
+
+training <- left_join(y_train, x_train, by = "ID") |> select(-ID)
+```
+
+## Part (a)
+
+### Linear Regression using basic R-package
+
+`lm()` computes the closed-form OLS solution derived in Lecture 3: minimising $E_{in}(\mathbf{w}) = \frac{1}{N}\|\mathbf{Xw-y}\|^2$ by setting the gradient to zero gives $\mathbf{w}^* = (\mathbf{X}^T\mathbf{X})^{-1}\mathbf{X}^T\mathbf{y}$. No iterative algorithm (gradient descent) is needed here since linear regression has a closed-form minimiser, unlike logistic regression or the ANN in part (c).
+
+```{r, impute bedrooms}
+bedrooms_median <- median(training$total_bedrooms, na.rm = TRUE)
+
+training <- training |>
+  mutate(total_bedrooms = if_else(is.na(total_bedrooms), bedrooms_median, total_bedrooms))
+
+x_test <- x_test |>
+  mutate(total_bedrooms = if_else(is.na(total_bedrooms), bedrooms_median, total_bedrooms))
+```
+
+```{r, in-sample fit}
+final_fit <- lm(Price ~ ., data = training)
+
+rmse <- function(actual, predicted) {
+  sqrt(mean((actual - predicted)^2)) }
+
+rmse(training$Price, predict(final_fit, training))
+summary(final_fit)$r.squared
+```
+
+### Linear regression from first principles
+
+`lm()` handles the `ocean_proximity` factor automatically, converting it to dummy columns internally. To build **X** by hand for the pseudo-inverse algorithm above, we have to do that encoding ourselves: one dummy column per category except a baseline (`<1H OCEAN`, which `lm()` also treats as the baseline and absorbs into the intercept).
+
+```{r, manual categorical encoding}
+training_encoded <- training |>
+  mutate(
+    ocean_proximityINLAND      = as.numeric(ocean_proximity == "INLAND"),
+    ocean_proximityISLAND      = as.numeric(ocean_proximity == "ISLAND"),
+    `ocean_proximityNEAR BAY`   = as.numeric(ocean_proximity == "NEAR BAY"),
+    `ocean_proximityNEAR OCEAN` = as.numeric(ocean_proximity == "NEAR OCEAN")
+  ) |>
+  select(-ocean_proximity)
+```
+
+```{r, linear regression algorithm}
+X <- cbind(`(Intercept)` = 1, as.matrix(select(training_encoded, -Price)))
+y <- training_encoded$Price
+
+w_manual <- solve(crossprod(X), crossprod(X, y))
+
+tibble(
+  term = rownames(w_manual),
+  manual = as.numeric(w_manual),
+  lm = coef(final_fit)[rownames(w_manual)]
+)
+```
+
+$R^2 = 1 - SS_{res}/SS_{tot}$, where $SS_{res}$ is the model's squared error and $SS_{tot}$ is the squared error from just predicting $\bar{y}$ every time.
+
+```{r, manual r-squared}
+predicted_manual <- X %*% w_manual
+
+ss_res <- sum((y - predicted_manual)^2)
+ss_tot <- sum((y - mean(y))^2)
+
+r_squared_manual <- 1 - ss_res / ss_tot
+
+r_squared_manual
+summary(final_fit)$r.squared
+```
+
+```{r, kaggle submission}
+test_predictions <- predict(final_fit, newdata = x_test)
+
+submission <- tibble(ID = x_test$ID, Price = test_predictions)
+
+write_csv(submission, here::here("submissions/submission_lm.csv"))
+```
+
+| Model             | In-sample R² | Kaggle (out-of-sample) R² |
+|-------------------|--------------|---------------------------|
+| Linear regression | 0.646        | 0.645                     |
+
+`median_income` has by far the strongest effect: each extra \$10,000 of median block income is associated with roughly \$40,000 higher predicted house price, holding other predictors fixed. `total_rooms` has a *negative* coefficient despite more rooms intuitively meaning a bigger/pricier block - this is a multicollinearity artefact, not a genuine effect: `total_rooms`, `total_bedrooms`, `population`, and `households` are all block-level totals that move together, so the model can't cleanly separate their individual contributions. This is the kind of issue the ratio features in part (b) are meant to fix.
