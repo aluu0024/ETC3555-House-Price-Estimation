@@ -489,16 +489,28 @@ resid_plot(predicted_log_ridge, y_log, "Residuals vs fitted (log scale): Model 4
 
 **Findings:**
 
+<<<<<<< HEAD
 - CV again selects $\lambda \approx 10^{-4}$ on the log scale, consistent with Model 2 - still no meaningful regularisation once the lambda search is wide enough to find it.
 - In-sample R² sits a little below Model 3's exact OLS-on-log fit (0.695 vs 0.709) - the same `glmnet` numerical gap noted in Model 2's findings, now on the log scale.
 - The substantive conclusion is unchanged: combining ridge with the log transform doesn't outperform the log transform alone, so Model 3 remains the final part (b) model.
 - Resubmitted Kaggle score for `submission_b_ridge_log.csv`: 0.653 - down from the closed-form version's 0.688, and a bigger drop than the in-sample gap (0.709 vs 0.695) alone would suggest. This is consistent with the numerical-precision explanation above extending out-of-sample rather than a new problem: the glmnet fit is a slightly different (less exact) solution at the same near-zero $\lambda$, and that imprecision shows up somewhat more on unseen data than on the training rows it was fit to.
+=======
+- CV on the log scale again selects $\lambda \approx 10^{-4}$ ($\approx 0$) - regularisation doesn't help here either.
+- In-sample fit is virtually identical to Model 3's plain OLS fit on log(Price) (RMSE 62,212 either way, R² 0.709) - confirms Model 2's finding holds regardless of the target's scale.
+- Combining the two techniques doesn't outperform either alone here, so Model 3 (simpler, no regularisation needed) stays the designated final model.
+>>>>>>> parent of 396aa12 (Update Working Out.qmd)
 
 | Model | In-sample R² | Kaggle (out-of-sample) R² |
 |----|----|----|
 | Linear regression (part a) | 0.646 | 0.645 |
 | Model 1: engineered features (OLS) | 0.694 | *not separately submitted* |
+<<<<<<< HEAD
 | Model 2: ridge regression, CV-selected lambda (glmnet) | 0.687 (RMSE 64,547) | *pending resubmission* |
 | Model 2 (LASSO variant): L1 regularisation (glmnet) | 0.687 (RMSE 64,547) | *pending submission* |
 | Model 3: + log(Price) target, smeared back-transform (final) | 0.709 (RMSE 62,212) | 0.688 |
 | Model 4: ridge regression on log(Price) target (glmnet) | 0.695 (RMSE 63,687) | 0.653 |
+=======
+| Model 2: + ridge regression, CV-selected lambda | 0.694 | 0.690 |
+| Model 3: + log(Price) target, smeared back-transform (final) | 0.709 (RMSE 62,212) | 0.688 |
+| Model 4: ridge regression on log(Price) target | 0.709 (RMSE 62,212) | *pending resubmission* |
+>>>>>>> parent of 396aa12 (Update Working Out.qmd)
