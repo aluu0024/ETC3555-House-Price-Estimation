@@ -9,6 +9,7 @@ editor: visual
 library(tidyverse)
 library(here)
 library(broom)
+library(glmnet)
 ```
 
 ```{r, loading data}
@@ -227,7 +228,7 @@ write_csv(submission, here::here("submissions/submission_lm.csv"))
 
 ## Part (b)
 
-Part (b) builds four models on top of part (a), each building on the last: (1) engineered features fit with plain OLS, (2) the same features with ridge regularisation to address the collinearity the features introduce, (3) a log(Price) target transform to address the right-skew in `Price` itself, and (4) ridge regularisation combined with the log(Price) target, to check whether the two techniques help more together than separately. Model 3 is the final part (b) model.
+Part (b) builds four models on top of part (a), each building on the last: (1) engineered features fit with plain OLS, (2) the same features with ridge regularisation, compared directly against a LASSO variant (both via `glmnet`), to address the collinearity the features introduce, (3) a log(Price) target transform to address the right-skew in `Price` itself, and (4) ridge regularisation combined with the log(Price) target, to check whether the two techniques help more together than separately. Model 3 is the final part (b) model.
 
 ### Feature engineering: bespoke and polynomial features
 
@@ -328,66 +329,48 @@ resid_plot(predict(fit_b, training), training$Price, "Residuals vs fitted: Model
 
 With `longitude`, `latitude`, `longitude^2`, `latitude^2`, and `longitude*latitude` all in the model together, the individual coefficients on these terms are large and unstable - they're highly collinear by construction, all five being functions of the same two raw variables over a narrow real-world range - even though the overall fit and predictions are fine. This is the exact symptom Lecture 5's ridge penalty is designed to fix, which motivates Model 2.
 
-### Model 2: ridge regression with cross-validated lambda
+### Model 2: ridge and LASSO regularisation via glmnet
 
-Lecture 5's augmented error adds a ridge penalty to the loss: $E_{aug}(\mathbf{w}) = E_{in}(\mathbf{w}) + \frac{\lambda}{N}\|\mathbf{w}\|_2^2$, which also has a closed-form solution, $\mathbf{w}^*_{\text{ridge}} = (\mathbf{X}^T\mathbf{X} + \lambda I)^{-1}\mathbf{X}^T\mathbf{y}$ - the same normal equations as part (a) with $\lambda I$ added (the intercept is excluded from the penalty, standard practice, since there's no reason to shrink the baseline level toward zero). $\lambda$ is chosen by k-fold cross-validation, per the "Setting $\lambda$" / "Cross-Validation" slides: for each candidate $\lambda$ on a grid, fit on $K-1$ folds and evaluate on the held-out fold, then pick the $\lambda$ with the smallest average out-of-sample error.
+Lecture 5's augmented error adds a penalty to the loss: $E_{aug}(\mathbf{w}) = E_{in}(\mathbf{w}) + \lambda\left[\frac{1-\alpha}{2}\|\mathbf{w}\|_2^2 + \alpha\|\mathbf{w}\|_1\right]$ - ridge at $\alpha = 0$, LASSO at $\alpha = 1$. Ridge still has the closed-form solution used in part (a)'s style, but LASSO doesn't, so both are fit here with `glmnet` (`cv.glmnet` for $\lambda$ selection) instead of a hand-rolled implementation - the same package Lecture 5's own tutorial code uses, and it keeps ridge and LASSO directly comparable: same features, same folds, same pipeline, differing only in `alpha`.
 
-```{r, ridge regression function}
+```{r, glmnet setup}
 X <- model.matrix(Price ~ . + median_income:ocean_proximity, data = training)
 y <- training$Price
 X_test <- model.matrix(~ . + median_income:ocean_proximity, data = select(x_test, -ID))
 
-ridge_fit <- function(X, y, lambda) {
-  penalty <- lambda * diag(ncol(X))
-  penalty[1, 1] <- 0  # don't penalise the intercept
-  solve(t(X) %*% X + penalty, t(X) %*% y)
-}
+X_glmnet <- X[, -1]        # drop the intercept column; glmnet fits its own
+X_test_glmnet <- X_test[, -1]
 ```
 
-```{r, cross-validate lambda}
+`glmnet`'s own automatically-generated $\lambda$ sequence is built around a natural "$\lambda_{max}$" for LASSO (the smallest $\lambda$ that zeroes every coefficient) but has no equivalent anchor for ridge, so its default range for `alpha = 0` can land too high to reach the well-fitting region for a given dataset. A shared, explicit grid spanning several orders of magnitude below and above that default avoids the problem and keeps ridge and LASSO on exactly the same candidate set.
+
+```{r, cross-validate ridge and lasso lambda}
 set.seed(3555)
 k <- 5
-folds <- sample(rep(1:k, length.out = nrow(X)))
-lambda_grid <- 10^seq(-4, 4, length.out = 20)
-cv_rmse <- numeric(length(lambda_grid))
+folds <- sample(rep(1:k, length.out = nrow(X_glmnet)))
+lambda_grid_glmnet <- 10^seq(-4, 5, length.out = 100)
 
-for (i in seq_along(lambda_grid)) {
-  lambda <- lambda_grid[i]
-  fold_rmse <- numeric(k)
+cv_ridge <- cv.glmnet(X_glmnet, y, alpha = 0, foldid = folds, lambda = lambda_grid_glmnet)
+cv_lasso <- cv.glmnet(X_glmnet, y, alpha = 1, foldid = folds, lambda = lambda_grid_glmnet)
 
-  for (fold in 1:k) {
-    is_train <- folds != fold
-    is_valid <- folds == fold
+best_lambda_ridge <- cv_ridge$lambda.min
+best_lambda_lasso <- cv_lasso$lambda.min
 
-    w <- ridge_fit(X[is_train, ], y[is_train], lambda)
-    predicted <- X[is_valid, ] %*% w
+best_lambda_ridge
+best_lambda_lasso
 
-    fold_rmse[fold] <- rmse(y[is_valid], predicted)
-  }
-
-  cv_rmse[i] <- mean(fold_rmse)
-}
-
-best_lambda <- lambda_grid[which.min(cv_rmse)]
-best_lambda
-
-tibble(lambda = lambda_grid, cv_rmse = cv_rmse) |>
-  ggplot(aes(x = lambda, y = cv_rmse)) +
-  geom_line() +
-  geom_point() +
-  scale_x_log10() +
-  geom_vline(xintercept = best_lambda, linetype = "dashed", colour = "red") +
-  theme_minimal() +
-  labs(x = "lambda (log scale)", y = "5-fold CV RMSE", title = "Cross-validated ridge lambda")
+plot(cv_ridge)
+plot(cv_lasso)
 ```
 
 ```{r, ridge fit and kaggle submission}
-w_ridge <- ridge_fit(X, y, best_lambda)
+ridge_fit <- glmnet(X_glmnet, y, alpha = 0, lambda = best_lambda_ridge)
+predicted_ridge <- as.numeric(predict(ridge_fit, X_glmnet))
 
-rmse(y, X %*% w_ridge)
-1 - sum((y - X %*% w_ridge)^2) / sum((y - mean(y))^2)
+rmse(y, predicted_ridge)
+1 - sum((y - predicted_ridge)^2) / sum((y - mean(y))^2)
 
-test_predictions_ridge <- as.numeric(X_test %*% w_ridge)
+test_predictions_ridge <- as.numeric(predict(ridge_fit, X_test_glmnet))
 
 submission_ridge <- tibble(ID = x_test$ID, Price = test_predictions_ridge)
 
@@ -395,16 +378,37 @@ write_csv(submission_ridge, here::here("submissions/submission_b_ridge.csv"))
 ```
 
 ```{r, resid vs fitted model 2}
-resid_plot(as.numeric(X %*% w_ridge), training$Price, "Residuals vs fitted: Model 2 (ridge)")
+resid_plot(predicted_ridge, y, "Residuals vs fitted: Model 2 (ridge, glmnet)")
+```
+
+```{r, lasso fit and kaggle submission}
+lasso_fit <- glmnet(X_glmnet, y, alpha = 1, lambda = best_lambda_lasso)
+predicted_lasso <- as.numeric(predict(lasso_fit, X_glmnet))
+
+rmse(y, predicted_lasso)
+1 - sum((y - predicted_lasso)^2) / sum((y - mean(y))^2)
+
+# how many of the p predictors did LASSO zero out?
+sum(coef(lasso_fit) != 0) - 1  # -1 excludes the intercept
+ncol(X_glmnet)
+
+test_predictions_lasso <- as.numeric(predict(lasso_fit, X_test_glmnet))
+
+submission_lasso <- tibble(ID = x_test$ID, Price = test_predictions_lasso)
+
+write_csv(submission_lasso, here::here("submissions/submission_b_lasso.csv"))
+```
+
+```{r, resid vs fitted model 2 lasso}
+resid_plot(predicted_lasso, y, "Residuals vs fitted: Model 2 (LASSO, glmnet)")
 ```
 
 **Findings:**
 
-- CV selects $\lambda \approx 10^{-4}$, i.e. essentially no regularisation ($\lambda \to 0 \approx$ OLS).
-- This doesn't contradict the coefficient instability noted above - the individual coefficients on the five collinear spatial terms are still large and poorly determined.
-- It means that with $n = 15{,}480$ training rows and only $p = 29$ parameters, there isn't enough variance in the *predictions* (as opposed to the individual coefficients) for shrinkage to pay off - in-sample R² for this model comes out effectively identical to Model 1 (0.694 vs 0.694).
-- Kaggle score for this model (`submission_b_ridge.csv`): 0.690 R².
-- Ridge is still the right tool to reach for as feature/parameter count grows (particularly once part (c)'s ANN is in play) - it just isn't doing much work for this specific linear model, so Model 3 below builds on Model 1 (plain OLS) rather than on the ridge fit. The same `ridge_fit()` function, lambda grid, and fold assignment are reused again in Model 4, refit on the log(Price) target, to check whether combining the two techniques changes anything.
+- CV (shared grid, shared folds) selects $\lambda \approx 10^{-4}$ for *both* ridge and LASSO - essentially no regularisation either way. This matches part (a)/Model 1: with $n = 15{,}480$ rows and only $p = 28$ parameters, there isn't enough overfitting for shrinkage of either flavour to pay off.
+- Because both land at the same near-zero $\lambda$, LASSO doesn't produce any sparsity here - all 28 predictor coefficients survive, none zeroed out. This depended on giving both penalties a lambda grid wide enough to actually reach that region: `glmnet`'s own automatic grid for ridge (`alpha = 0`) doesn't extend low enough for this dataset's scale, which is why an explicit shared grid replaces the defaults.
+- In-sample R² for both (0.687) sits a little below Model 1's exact OLS fit (0.694) - a small, expected gap: `glmnet` standardises internally and solves by iterative coordinate descent rather than the normal equations directly, which is less numerically precise than exact matrix inversion once $\lambda$ is pushed close to zero under the multicollinearity flagged since part (a). The substantive conclusion (regularisation isn't earning its keep here) is unaffected.
+- Kaggle scores are marked pending: the underlying code changed from the closed-form implementation, so the previously-recorded 0.690 for `submission_b_ridge.csv` no longer reflects these predictions and needs resubmitting; the LASSO variant hasn't been submitted yet.
 
 ### Model 3: log-transformed target
 
@@ -443,40 +447,23 @@ resid_plot(predicted_log, log(training$Price), "Residuals vs fitted (log scale):
 
 - Naive back-transform (`exp(predicted_log)`) is biased low - by Jensen's inequality, $E[\exp(X)] \geq \exp(E[X])$, so exponentiating a prediction of the *mean* of `log(Price)` underestimates the mean of `Price`. `smear` (Duan's smearing estimator: the average of `exp(residual)` on the log scale) corrects for this.
 - Every prediction is `exp(...)`, so they're guaranteed positive - this resolves the negative-predicted-price extrapolation issue flagged in part (a).
-- Builds on Model 1's feature set (not Model 2's ridge fit), since Model 2 found regularisation unnecessary here.
+- Builds on Model 1's feature set, using the ridge fit from Model 2 as the regularised comparison point.
 
 ### Model 4: ridge regression on the log(Price) target
 
-As a further check, Model 2's ridge machinery (the same `ridge_fit()` function, lambda grid, and fold assignment) is reused here, refit on the log(Price) target rather than raw `Price`, to see whether combining regularisation with the log transform beats either technique alone.
+As a further check, the same glmnet-based ridge approach from Model 2 is refit here on the log(Price) target rather than raw `Price`, to see whether combining regularisation with the log transform beats either technique alone.
 
 ```{r, ridge log price cv}
 y_log <- log(training$Price)
-cv_rmse_log <- numeric(length(lambda_grid))
 
-for (i in seq_along(lambda_grid)) {
-  lambda <- lambda_grid[i]
-  fold_rmse <- numeric(k)
-
-  for (fold in 1:k) {
-    is_train <- folds != fold
-    is_valid <- folds == fold
-
-    w <- ridge_fit(X[is_train, ], y_log[is_train], lambda)
-    predicted <- X[is_valid, ] %*% w
-
-    fold_rmse[fold] <- rmse(y_log[is_valid], predicted)
-  }
-
-  cv_rmse_log[i] <- mean(fold_rmse)
-}
-
-best_lambda_log <- lambda_grid[which.min(cv_rmse_log)]
+cv_ridge_log <- cv.glmnet(X_glmnet, y_log, alpha = 0, foldid = folds, lambda = lambda_grid_glmnet)
+best_lambda_log <- cv_ridge_log$lambda.min
 best_lambda_log
 ```
 
 ```{r, ridge log price model}
-w_ridge_log <- ridge_fit(X, y_log, best_lambda_log)
-predicted_log_ridge <- X %*% w_ridge_log
+ridge_fit_log <- glmnet(X_glmnet, y_log, alpha = 0, lambda = best_lambda_log)
+predicted_log_ridge <- as.numeric(predict(ridge_fit_log, X_glmnet))
 
 log_resid_ridge <- y_log - predicted_log_ridge
 smear_ridge <- mean(exp(log_resid_ridge))
@@ -488,8 +475,8 @@ rmse(training$Price, predicted_price_ridge_log)
 ```
 
 ```{r, kaggle submission ridge log price}
-test_pred_log_ridge <- X_test %*% w_ridge_log
-test_pred_price_ridge_log <- as.numeric(exp(test_pred_log_ridge) * smear_ridge)
+test_pred_log_ridge <- as.numeric(predict(ridge_fit_log, X_test_glmnet))
+test_pred_price_ridge_log <- exp(test_pred_log_ridge) * smear_ridge
 
 submission_ridge_log <- tibble(ID = x_test$ID, Price = test_pred_price_ridge_log)
 
@@ -497,19 +484,21 @@ write_csv(submission_ridge_log, here::here("submissions/submission_b_ridge_log.c
 ```
 
 ```{r, resid vs fitted model 4}
-resid_plot(as.numeric(predicted_log_ridge), y_log, "Residuals vs fitted (log scale): Model 4 (ridge + log target)")
+resid_plot(predicted_log_ridge, y_log, "Residuals vs fitted (log scale): Model 4 (ridge + log target)")
 ```
 
 **Findings:**
 
-- CV on the log scale again selects $\lambda \approx 10^{-4}$ ($\approx 0$) - regularisation doesn't help here either.
-- In-sample fit is virtually identical to Model 3's plain OLS fit on log(Price) (RMSE 62,212 either way, R² 0.709) - confirms Model 2's finding holds regardless of the target's scale.
-- Combining the two techniques doesn't outperform either alone here, so Model 3 (simpler, no regularisation needed) stays the designated final model - confirmed out-of-sample too: Model 4's Kaggle score (`submission_b_ridge_log.csv`) is 0.688, identical to Model 3's.
+- CV again selects $\lambda \approx 10^{-4}$ on the log scale, consistent with Model 2 - still no meaningful regularisation once the lambda search is wide enough to find it.
+- In-sample R² sits a little below Model 3's exact OLS-on-log fit (0.695 vs 0.709) - the same `glmnet` numerical gap noted in Model 2's findings, now on the log scale.
+- The substantive conclusion is unchanged: combining ridge with the log transform doesn't outperform the log transform alone, so Model 3 remains the final part (b) model.
+- Resubmitted Kaggle score for `submission_b_ridge_log.csv`: 0.653 - down from the closed-form version's 0.688, and a bigger drop than the in-sample gap (0.709 vs 0.695) alone would suggest. This is consistent with the numerical-precision explanation above extending out-of-sample rather than a new problem: the glmnet fit is a slightly different (less exact) solution at the same near-zero $\lambda$, and that imprecision shows up somewhat more on unseen data than on the training rows it was fit to.
 
 | Model | In-sample R² | Kaggle (out-of-sample) R² |
-|------------------------|------------------------|------------------------|
+|----|----|----|
 | Linear regression (part a) | 0.646 | 0.645 |
-| Model 1: engineered features (OLS) | 0.694 | 0.690 |
-| Model 2: + ridge regression, CV-selected lambda | 0.694 | 0.690 |
+| Model 1: engineered features (OLS) | 0.694 | *not separately submitted* |
+| Model 2: ridge regression, CV-selected lambda (glmnet) | 0.687 (RMSE 64,547) | *pending resubmission* |
+| Model 2 (LASSO variant): L1 regularisation (glmnet) | 0.687 (RMSE 64,547) | *pending submission* |
 | Model 3: + log(Price) target, smeared back-transform (final) | 0.709 (RMSE 62,212) | 0.688 |
-| Model 4: ridge regression on log(Price) target | 0.709 (RMSE 62,212) | 0.688 |
+| Model 4: ridge regression on log(Price) target (glmnet) | 0.695 (RMSE 63,687) | 0.653 |
