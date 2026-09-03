@@ -509,7 +509,7 @@ resid_plot(as.numeric(predicted_log_ridge), y_log, "Residuals vs fitted (log sca
 | Model | In-sample R² | Kaggle (out-of-sample) R² |
 |------------------------|------------------------|------------------------|
 | Linear regression (part a) | 0.646 | 0.645 |
-| Model 1: engineered features (OLS) | 0.694 | *not separately submitted* |
+| Model 1: engineered features (OLS) | 0.694 | 0.690 |
 | Model 2: + ridge regression, CV-selected lambda | 0.694 | 0.690 |
 | Model 3: + log(Price) target, smeared back-transform (final) | 0.709 (RMSE 62,212) | 0.688 |
 | Model 4: ridge regression on log(Price) target | 0.709 (RMSE 62,212) | 0.688 |
